@@ -1,0 +1,44 @@
+name: Build and Deploy
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.21'
+
+    - name: Build
+      run: |
+        go mod download
+        CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -o soshial
+
+    - name: Deploy to Droplet
+      env:
+        DROPLET_HOST: ${{ secrets.DROPLET_HOST }}
+        DROPLET_USER: ${{ secrets.DROPLET_USER }}
+        DROPLET_PORT: ${{ secrets.DROPLET_PORT }}
+        DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+        SSH_PRIVATE_KEY: ${{ secrets.DROPLET_SSH_KEY }}
+      run: |
+        # Set up SSH
+        mkdir -p ~/.ssh
+        echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
+        chmod 600 ~/.ssh/id_rsa
+        ssh-keyscan -p $DROPLET_PORT -H $DROPLET_HOST >> ~/.ssh/known_hosts
+
+        # Transfer binary
+        scp -P $DROPLET_PORT soshial $DROPLET_USER@$DROPLET_HOST:$DEPLOY_PATH/soshial
+
+        # Restart service
+        ssh -p $DROPLET_PORT $DROPLET_USER@$DROPLET_HOST "systemctl restart soshial"
