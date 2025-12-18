@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -21,7 +22,6 @@ import (
 )
 
 const (
-	port   = 2222
 	dbPath = "./soshial.db"
 )
 
@@ -30,6 +30,14 @@ func main() {
 	host := os.Getenv("SOSHIAL_HOST")
 	if host == "" {
 		host = "localhost"
+	}
+
+	// Get port from environment variable, default to 2222
+	port := 2222
+	if portEnv := os.Getenv("SOSHIAL_PORT"); portEnv != "" {
+		if p, err := strconv.Atoi(portEnv); err == nil {
+			port = p
+		}
 	}
 
 	db, err := NewDatabase(dbPath)
