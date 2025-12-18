@@ -37,11 +37,14 @@ jobs:
         chmod 600 ~/.ssh/id_rsa
         ssh-keyscan -p $DROPLET_PORT -H $DROPLET_HOST >> ~/.ssh/known_hosts
 
+        # Stop service before replacing binary
+        ssh -p $DROPLET_PORT $DROPLET_USER@$DROPLET_HOST "systemctl stop soshial"
+
         # Transfer binary
         scp -P $DROPLET_PORT soshial $DROPLET_USER@$DROPLET_HOST:$DEPLOY_PATH/soshial
 
         # Make binary executable
         ssh -p $DROPLET_PORT $DROPLET_USER@$DROPLET_HOST "chmod +x $DEPLOY_PATH/soshial"
 
-        # Restart service
-        ssh -p $DROPLET_PORT $DROPLET_USER@$DROPLET_HOST "systemctl restart soshial"
+        # Start service
+        ssh -p $DROPLET_PORT $DROPLET_USER@$DROPLET_HOST "systemctl start soshial"
