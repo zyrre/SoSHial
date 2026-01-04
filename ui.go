@@ -90,6 +90,8 @@ type model struct {
 	selectedMessageIndex  int
 	messageCount          int // Cached count of messages
 	messageScrollOffset   int // Current scroll offset for the selected message
+	replyMode             bool // Whether reply input is active
+	replyInput            textinput.Model
 
 	// General
 	err           error
@@ -253,6 +255,11 @@ func newModel(db *Database, userKey string, renderer *lipgloss.Renderer, rateLim
 	ta.SetHeight(5)
 	ta.ShowLineNumbers = true
 
+	replyInput := textinput.New()
+	replyInput.Placeholder = "Type your reply here..."
+	replyInput.CharLimit = 200
+	replyInput.Width = 64
+
 	return model{
 		db:             db,
 		userKey:        userKey,
@@ -262,6 +269,7 @@ func newModel(db *Database, userKey string, renderer *lipgloss.Renderer, rateLim
 		recipientInput: ti,
 		messageInput:   &ta,
 		rateLimiter:    rateLimiter,
+		replyInput:     replyInput,
 	}
 }
 
@@ -564,12 +572,66 @@ func (m model) executeMenuAction() (tea.Model, tea.Cmd) {
 }
 
 func (m model) updateViewMessages(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Handle reply mode separately
+	if m.replyMode {
+		switch msg.String() {
+		case "enter":
+			// Send reply
+			if len(m.messages) > 0 && m.replyInput.Value() != "" {
+				currentMsg := m.messages[m.selectedMessageIndex]
+				replyText := m.replyInput.Value()
+
+				// Check rate limit
+				if !m.rateLimiter.CanSendMessage(m.userKey) {
+					m.err = fmt.Errorf("rate limit: please wait 10 seconds between messages")
+					return m, nil
+				}
+
+				// Send reply to the sender of the current message
+				if err := m.db.SendMessage(m.userKey, currentMsg.FromKey, replyText); err != nil {
+					m.err = err
+				} else {
+					m.rateLimiter.RecordMessage(m.userKey)
+					m.successMsg = "Reply sent!"
+					m.replyMode = false
+					m.replyInput.SetValue("")
+					m.replyInput.Blur()
+				}
+			}
+			return m, nil
+
+		case "esc":
+			// Cancel reply
+			m.replyMode = false
+			m.replyInput.SetValue("")
+			m.replyInput.Blur()
+			return m, nil
+
+		default:
+			// Forward to reply input
+			var cmd tea.Cmd
+			m.replyInput, cmd = m.replyInput.Update(msg)
+			return m, cmd
+		}
+	}
+
+	// Normal mode (not replying)
 	switch msg.String() {
 	case "q", "esc":
 		m.currentScreen = mainMenu
 		m.messages = nil
 		m.selectedMessageIndex = 0
 		m.messageScrollOffset = 0
+		m.replyMode = false
+
+	case "r":
+		// Enter reply mode
+		if len(m.messages) > 0 {
+			m.replyMode = true
+			m.replyInput.Focus()
+			m.err = nil
+			m.successMsg = ""
+		}
 
 	case "j", "down":
 		if len(m.messages) > 0 {
@@ -988,11 +1050,16 @@ func (m model) viewMessagesScreen() string {
 
 				// Timestamp and helper text on same line
 				msgLines := strings.Split(msg.Message, "\n")
-				const maxMessageLines = 5
+
+				// Show 4 lines when replying to make room for reply input, otherwise 5
+				maxMessageLines := 5
+				if m.replyMode {
+					maxMessageLines = 4
+				}
 
 				timeStr := st.messageTimeStyle.Render(msg.Timestamp.Format("Mon, Jan 2 2006 at 15:04"))
 
-				// Add helper text on same line if message is longer than 5 lines
+				// Add helper text on same line if message is longer than max lines
 				if len(msgLines) > maxMessageLines {
 					helperStyle := m.renderer.NewStyle().Foreground(st.mutedColor)
 					helperText := helperStyle.Render("j/k ↑↓ to view full message")
@@ -1013,7 +1080,7 @@ func (m model) viewMessagesScreen() string {
 				}
 				messageContent.WriteString("\n")
 
-				// Message content - limit to exactly 5 lines (header=1, timestamp=1, message=5 for total of 7)
+				// Message content - show 4 or 5 lines depending on reply mode
 
 				// Display message lines with scroll offset
 				startLine := m.messageScrollOffset
@@ -1030,6 +1097,35 @@ func (m model) viewMessagesScreen() string {
 					if j < maxMessageLines-1 {
 						messageContent.WriteString("\n")
 					}
+				}
+
+				// Add reply input if in reply mode (replaces one line of message content)
+				if m.replyMode {
+					messageContent.WriteString("\n")
+
+					// Create full-width reply row with background
+					const internalWidth = 66
+
+					// Get input view
+					inputView := m.replyInput.View()
+
+					// Calculate padding needed to fill width
+					currentWidth := lipgloss.Width(inputView)
+					paddingNeeded := internalWidth - currentWidth
+					if paddingNeeded < 0 {
+						paddingNeeded = 0
+					}
+
+					// Create the full row with background
+					fullRow := inputView + strings.Repeat(" ", paddingNeeded)
+
+					// Apply background to the entire row
+					rowStyle := m.renderer.NewStyle().
+						Background(st.mutedColor).
+						Width(internalWidth)
+
+					styledRow := rowStyle.Render(fullRow)
+					messageContent.WriteString(styledRow)
 				}
 
 				// Full box with highlighted border
@@ -1140,7 +1236,14 @@ func (m model) viewMessagesScreen() string {
 		s.WriteString(m.renderer.NewStyle().Foreground(st.errorColor).Render("  ✗ " + m.err.Error()))
 	}
 
-	s.WriteString(st.helpStyle.Render("j/k or ↑/↓ to navigate • d to delete • esc to return"))
+	// Help text depends on reply mode
+	var helpText string
+	if m.replyMode {
+		helpText = "enter to send reply • esc to cancel"
+	} else {
+		helpText = "j/k or ↑/↓ to navigate • r to reply • d to delete • esc to return"
+	}
+	s.WriteString(st.helpStyle.Render(helpText))
 
 	return s.String()
 }
