@@ -21,6 +21,13 @@ const (
 	sendMessageContent
 )
 
+type viewMode int
+
+const (
+	viewModeThreaded viewMode = iota
+	viewModeConversation
+)
+
 type themeName string
 
 const (
@@ -71,6 +78,13 @@ var themes = map[themeName]theme{
 	},
 }
 
+type messageThread struct {
+	senderKey     string
+	messageCount  int
+	latestMessage Message
+	allMessages   []Message
+}
+
 type model struct {
 	db               *Database
 	userKey          string
@@ -92,6 +106,13 @@ type model struct {
 	messageScrollOffset   int // Current scroll offset for the selected message
 	replyMode             bool // Whether reply input is active
 	replyInput            textinput.Model
+
+	// For threading
+	currentViewMode       viewMode
+	threads               []messageThread
+	selectedThreadIndex   int
+	conversationPartner   string
+	conversationMessages  []Message
 
 	// General
 	err           error
@@ -278,6 +299,47 @@ func (m model) Init() tea.Cmd {
 		m.loadMessageCount(),
 		tickEveryMinute(),
 	)
+}
+
+// groupMessagesIntoThreads groups messages by sender and returns threads sorted by latest message
+func groupMessagesIntoThreads(messages []Message) []messageThread {
+	threadMap := make(map[string]*messageThread)
+
+	for _, msg := range messages {
+		if thread, exists := threadMap[msg.FromKey]; exists {
+			thread.messageCount++
+			thread.allMessages = append(thread.allMessages, msg)
+			// Update latest message if this one is newer
+			if msg.Timestamp.After(thread.latestMessage.Timestamp) {
+				thread.latestMessage = msg
+			}
+		} else {
+			threadMap[msg.FromKey] = &messageThread{
+				senderKey:     msg.FromKey,
+				messageCount:  1,
+				latestMessage: msg,
+				allMessages:   []Message{msg},
+			}
+		}
+	}
+
+	// Convert map to slice
+	threads := make([]messageThread, 0, len(threadMap))
+	for _, thread := range threadMap {
+		threads = append(threads, *thread)
+	}
+
+	// Sort threads by latest message timestamp (newest first)
+	// Simple bubble sort for small data sets
+	for i := 0; i < len(threads)-1; i++ {
+		for j := 0; j < len(threads)-i-1; j++ {
+			if threads[j].latestMessage.Timestamp.Before(threads[j+1].latestMessage.Timestamp) {
+				threads[j], threads[j+1] = threads[j+1], threads[j]
+			}
+		}
+	}
+
+	return threads
 }
 
 func (m model) loadMessageCount() tea.Cmd {
@@ -544,6 +606,11 @@ func (m model) executeMenuAction() (tea.Model, tea.Cmd) {
 			}
 		}
 
+		// Group messages into threads
+		m.threads = groupMessagesIntoThreads(messages)
+		m.selectedThreadIndex = 0
+		m.currentViewMode = viewModeThreaded
+
 		m.currentScreen = viewMessages
 		m.selectedMessageIndex = 0
 		m.err = nil
@@ -577,8 +644,14 @@ func (m model) updateViewMessages(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "enter":
 			// Send reply
-			if len(m.messages) > 0 && m.replyInput.Value() != "" {
-				currentMsg := m.messages[m.selectedMessageIndex]
+			var recipientKey string
+			if m.currentViewMode == viewModeThreaded && len(m.threads) > 0 {
+				recipientKey = m.threads[m.selectedThreadIndex].senderKey
+			} else if m.currentViewMode == viewModeConversation {
+				recipientKey = m.conversationPartner
+			}
+
+			if recipientKey != "" && m.replyInput.Value() != "" {
 				replyText := m.replyInput.Value()
 
 				// Check rate limit
@@ -587,8 +660,8 @@ func (m model) updateViewMessages(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 
-				// Send reply to the sender of the current message
-				if err := m.db.SendMessage(m.userKey, currentMsg.FromKey, replyText); err != nil {
+				// Send reply
+				if err := m.db.SendMessage(m.userKey, recipientKey, replyText); err != nil {
 					m.err = err
 				} else {
 					m.rateLimiter.RecordMessage(m.userKey)
@@ -617,16 +690,75 @@ func (m model) updateViewMessages(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	// Normal mode (not replying)
 	switch msg.String() {
-	case "q", "esc":
-		m.currentScreen = mainMenu
-		m.messages = nil
-		m.selectedMessageIndex = 0
-		m.messageScrollOffset = 0
-		m.replyMode = false
+	case "q":
+		// If in conversation view, go back to threaded view
+		if m.currentViewMode == viewModeConversation {
+			m.currentViewMode = viewModeThreaded
+			m.conversationMessages = nil
+			m.conversationPartner = ""
+			m.selectedMessageIndex = 0
+			m.messageScrollOffset = 0
+			m.err = nil
+			m.successMsg = ""
+		} else {
+			// Otherwise go back to main menu
+			m.currentScreen = mainMenu
+			m.messages = nil
+			m.threads = nil
+			m.selectedMessageIndex = 0
+			m.selectedThreadIndex = 0
+			m.messageScrollOffset = 0
+			m.replyMode = false
+			m.currentViewMode = viewModeThreaded
+		}
+
+	case "esc":
+		// If in conversation view, go back to threaded view
+		if m.currentViewMode == viewModeConversation {
+			m.currentViewMode = viewModeThreaded
+			m.conversationMessages = nil
+			m.conversationPartner = ""
+			m.selectedMessageIndex = 0
+			m.messageScrollOffset = 0
+			m.err = nil
+			m.successMsg = ""
+		} else {
+			// Otherwise go back to main menu
+			m.currentScreen = mainMenu
+			m.messages = nil
+			m.threads = nil
+			m.selectedMessageIndex = 0
+			m.selectedThreadIndex = 0
+			m.messageScrollOffset = 0
+			m.replyMode = false
+		}
+
+	case "t", "enter":
+		// Enter conversation view (show all messages with selected sender)
+		if m.currentViewMode == viewModeThreaded && len(m.threads) > 0 {
+			thread := m.threads[m.selectedThreadIndex]
+			conversationMessages, err := m.db.GetConversationMessages(m.userKey, thread.senderKey)
+			if err != nil {
+				m.err = err
+				return m, nil
+			}
+			m.conversationMessages = conversationMessages
+			m.conversationPartner = thread.senderKey
+			m.currentViewMode = viewModeConversation
+			m.selectedMessageIndex = 0
+			m.messageScrollOffset = 0
+			m.err = nil
+			m.successMsg = ""
+		}
 
 	case "r":
 		// Enter reply mode
-		if len(m.messages) > 0 {
+		if m.currentViewMode == viewModeThreaded && len(m.threads) > 0 {
+			m.replyMode = true
+			m.replyInput.Focus()
+			m.err = nil
+			m.successMsg = ""
+		} else if m.currentViewMode == viewModeConversation && len(m.conversationMessages) > 0 {
 			m.replyMode = true
 			m.replyInput.Focus()
 			m.err = nil
@@ -634,64 +766,98 @@ func (m model) updateViewMessages(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case "j", "down":
-		if len(m.messages) > 0 {
-			// Check if current message can scroll down
-			currentMsg := m.messages[m.selectedMessageIndex]
-			msgLines := strings.Split(currentMsg.Message, "\n")
-			const maxVisibleLines = 5
+		if m.currentViewMode == viewModeThreaded {
+			// Navigate threads
+			if len(m.threads) > 0 {
+				// Check if current message can scroll down
+				currentMsg := m.threads[m.selectedThreadIndex].latestMessage
+				msgLines := strings.Split(currentMsg.Message, "\n")
+				const maxVisibleLines = 5
 
-			if len(msgLines) > maxVisibleLines {
-				// Message has more than 5 lines - check if we can scroll
-				maxOffset := len(msgLines) - maxVisibleLines
-				if m.messageScrollOffset < maxOffset {
-					// Scroll down within the current message
-					m.messageScrollOffset++
-					return m, nil
+				if len(msgLines) > maxVisibleLines {
+					maxOffset := len(msgLines) - maxVisibleLines
+					if m.messageScrollOffset < maxOffset {
+						m.messageScrollOffset++
+						return m, nil
+					}
 				}
+
+				m.selectedThreadIndex = (m.selectedThreadIndex + 1) % len(m.threads)
+				m.messageScrollOffset = 0
 			}
+		} else if m.currentViewMode == viewModeConversation {
+			// Navigate conversation messages
+			if len(m.conversationMessages) > 0 {
+				currentMsg := m.conversationMessages[m.selectedMessageIndex]
+				msgLines := strings.Split(currentMsg.Message, "\n")
+				const maxVisibleLines = 5
 
-			// At the end of message or message fits in view - go to next message
-			m.selectedMessageIndex = (m.selectedMessageIndex + 1) % len(m.messages)
-			m.messageScrollOffset = 0 // Reset scroll for new message
-		}
+				if len(msgLines) > maxVisibleLines {
+					maxOffset := len(msgLines) - maxVisibleLines
+					if m.messageScrollOffset < maxOffset {
+						m.messageScrollOffset++
+						return m, nil
+					}
+				}
 
-	case "k", "up":
-		if len(m.messages) > 0 {
-			// Check if current message can scroll up
-			if m.messageScrollOffset > 0 {
-				// Scroll up within the current message
-				m.messageScrollOffset--
-				return m, nil
-			}
-
-			// At the top of message - go to previous message
-			m.selectedMessageIndex = (m.selectedMessageIndex - 1 + len(m.messages)) % len(m.messages)
-
-			// Set scroll to bottom of new message if it's long
-			newMsg := m.messages[m.selectedMessageIndex]
-			msgLines := strings.Split(newMsg.Message, "\n")
-			const maxVisibleLines = 5
-			if len(msgLines) > maxVisibleLines {
-				m.messageScrollOffset = len(msgLines) - maxVisibleLines
-			} else {
+				m.selectedMessageIndex = (m.selectedMessageIndex + 1) % len(m.conversationMessages)
 				m.messageScrollOffset = 0
 			}
 		}
 
+	case "k", "up":
+		if m.currentViewMode == viewModeThreaded {
+			// Navigate threads
+			if len(m.threads) > 0 {
+				if m.messageScrollOffset > 0 {
+					m.messageScrollOffset--
+					return m, nil
+				}
+
+				m.selectedThreadIndex = (m.selectedThreadIndex - 1 + len(m.threads)) % len(m.threads)
+
+				newMsg := m.threads[m.selectedThreadIndex].latestMessage
+				msgLines := strings.Split(newMsg.Message, "\n")
+				const maxVisibleLines = 5
+				if len(msgLines) > maxVisibleLines {
+					m.messageScrollOffset = len(msgLines) - maxVisibleLines
+				} else {
+					m.messageScrollOffset = 0
+				}
+			}
+		} else if m.currentViewMode == viewModeConversation {
+			// Navigate conversation messages
+			if len(m.conversationMessages) > 0 {
+				if m.messageScrollOffset > 0 {
+					m.messageScrollOffset--
+					return m, nil
+				}
+
+				m.selectedMessageIndex = (m.selectedMessageIndex - 1 + len(m.conversationMessages)) % len(m.conversationMessages)
+
+				newMsg := m.conversationMessages[m.selectedMessageIndex]
+				msgLines := strings.Split(newMsg.Message, "\n")
+				const maxVisibleLines = 5
+				if len(msgLines) > maxVisibleLines {
+					m.messageScrollOffset = len(msgLines) - maxVisibleLines
+				} else {
+					m.messageScrollOffset = 0
+				}
+			}
+		}
+
 	case "d":
-		if len(m.messages) > 0 && m.selectedMessageIndex < len(m.messages) {
-			msgToDelete := m.messages[m.selectedMessageIndex]
+		if m.currentViewMode == viewModeConversation && len(m.conversationMessages) > 0 && m.selectedMessageIndex < len(m.conversationMessages) {
+			msgToDelete := m.conversationMessages[m.selectedMessageIndex]
 			if err := m.db.DeleteMessage(msgToDelete.ID); err != nil {
 				m.err = err
 			} else {
 				m.successMsg = "Message deleted"
-				// Remove from slice
-				m.messages = append(m.messages[:m.selectedMessageIndex], m.messages[m.selectedMessageIndex+1:]...)
-				// Adjust selection if needed
-				if m.selectedMessageIndex >= len(m.messages) && len(m.messages) > 0 {
-					m.selectedMessageIndex = len(m.messages) - 1
+				m.conversationMessages = append(m.conversationMessages[:m.selectedMessageIndex], m.conversationMessages[m.selectedMessageIndex+1:]...)
+				if m.selectedMessageIndex >= len(m.conversationMessages) && len(m.conversationMessages) > 0 {
+					m.selectedMessageIndex = len(m.conversationMessages) - 1
 				}
-				m.messageScrollOffset = 0 // Reset scroll
+				m.messageScrollOffset = 0
 			}
 		}
 	}
@@ -984,6 +1150,13 @@ func (m model) viewMainMenu() string {
 }
 
 func (m model) viewMessagesScreen() string {
+	if m.currentViewMode == viewModeThreaded {
+		return m.viewThreadedMessages()
+	}
+	return m.viewConversationMessages()
+}
+
+func (m model) viewThreadedMessages() string {
 	st := m.getStyles()
 	var s strings.Builder
 
@@ -995,55 +1168,59 @@ func (m model) viewMessagesScreen() string {
 	// Fixed height container for messages (always same height)
 	var messagesContent strings.Builder
 
-	if len(m.messages) == 0 {
+	if len(m.threads) == 0 {
 		// Empty state
 		emptyMsg := st.emptyStateStyle.Width(70).Render("📭 No messages yet!\n\nYour inbox is empty.")
 		messagesContent.WriteString(emptyMsg)
 	} else {
-		// Show max 3 messages at a time (1 expanded, 2 compact)
+		// Show max 3 threads at a time (1 expanded, 2 compact)
 		const maxVisible = 3
 
-		// Calculate which messages to show
-		// Position selected message at top, middle, or bottom depending on where it is in the list
+		// Calculate which threads to show
 		var startIdx, endIdx int
-		if m.selectedMessageIndex == 0 {
-			// Selected is first message - show it at top
+		if m.selectedThreadIndex == 0 {
 			startIdx = 0
 			endIdx = maxVisible
-			if endIdx > len(m.messages) {
-				endIdx = len(m.messages)
+			if endIdx > len(m.threads) {
+				endIdx = len(m.threads)
 			}
-		} else if m.selectedMessageIndex >= len(m.messages)-1 {
-			// Selected is last message - show it at bottom
-			endIdx = len(m.messages)
+		} else if m.selectedThreadIndex >= len(m.threads)-1 {
+			endIdx = len(m.threads)
 			startIdx = endIdx - maxVisible
 			if startIdx < 0 {
 				startIdx = 0
 			}
 		} else {
-			// Selected is in middle - show 1 before, selected, 1 after
-			startIdx = m.selectedMessageIndex - 1
+			startIdx = m.selectedThreadIndex - 1
 			if startIdx < 0 {
 				startIdx = 0
 			}
 			endIdx = startIdx + maxVisible
-			if endIdx > len(m.messages) {
-				endIdx = len(m.messages)
+			if endIdx > len(m.threads) {
+				endIdx = len(m.threads)
 			}
 		}
 
-		// Display the visible messages
+		// Display the visible threads
 		for i := startIdx; i < endIdx; i++ {
-			msg := m.messages[i]
+			thread := m.threads[i]
+			msg := thread.latestMessage
 
-			if i == m.selectedMessageIndex {
-				// Selected message - full expanded view with fixed content height
+			if i == m.selectedThreadIndex {
+				// Selected thread - full expanded view with fixed content height
 				var messageContent strings.Builder
 
-				// Header with sender
+				// Header with sender and thread count
 				header := st.messageHeaderStyle.Render(fmt.Sprintf("From: %s", msg.FromKey))
 				if !msg.Read {
 					header += " " + st.newBadgeStyle.Render(" NEW ")
+				}
+				// Add thread indicator if there are multiple messages
+				if thread.messageCount > 1 {
+					threadBadge := m.renderer.NewStyle().
+						Foreground(st.accentColor).
+						Render(fmt.Sprintf(" 🧵 %d", thread.messageCount))
+					header += " " + threadBadge
 				}
 				messageContent.WriteString(header)
 				messageContent.WriteString("\n")
@@ -1138,7 +1315,7 @@ func (m model) viewMessagesScreen() string {
 				box := selectedStyle.Render(messageContent.String())
 				messagesContent.WriteString(box)
 			} else {
-				// Unselected message - compact one-line view
+				// Unselected thread - compact one-line view
 				// Truncate sender to max 20 chars
 				sender := msg.FromKey
 				if len(sender) > 20 {
@@ -1149,26 +1326,23 @@ func (m model) viewMessagesScreen() string {
 				dateTimeStr := msg.Timestamp.Format("2006-01-02 15:04")
 
 				// Calculate direction indicator
-				// Hide direction text only for the middle compact box when selected is at top or bottom
 				var directionText string
-				isMiddleBox := (m.selectedMessageIndex == 0 && i == startIdx+1) ||
-					(m.selectedMessageIndex == len(m.messages)-1 && i == endIdx-2)
+				isMiddleBox := (m.selectedThreadIndex == 0 && i == startIdx+1) ||
+					(m.selectedThreadIndex == len(m.threads)-1 && i == endIdx-2)
 
 				if !isMiddleBox {
-					if i < m.selectedMessageIndex {
-						// This is a newer message
+					if i < m.selectedThreadIndex {
 						if i == 0 {
 							directionText = "  Newest"
 						} else {
 							newerCount := i
 							directionText = fmt.Sprintf("  %d newer...", newerCount)
 						}
-					} else if i > m.selectedMessageIndex {
-						// This is an older message
-						if i == len(m.messages)-1 {
+					} else if i > m.selectedThreadIndex {
+						if i == len(m.threads)-1 {
 							directionText = "  Oldest"
 						} else {
-							olderCount := len(m.messages) - i - 1
+							olderCount := len(m.threads) - i - 1
 							directionText = fmt.Sprintf("  %d older...", olderCount)
 						}
 					}
@@ -1178,6 +1352,10 @@ func (m model) viewMessagesScreen() string {
 				leftPart := fmt.Sprintf("From: %s", sender)
 				if !msg.Read {
 					leftPart += " " + st.newBadgeStyle.Render(" NEW ")
+				}
+				// Add compact thread count indicator
+				if thread.messageCount > 1 {
+					leftPart += fmt.Sprintf(" (🧵 %d)", thread.messageCount)
 				}
 
 				rightPart := dateTimeStr + directionText
@@ -1241,7 +1419,263 @@ func (m model) viewMessagesScreen() string {
 	if m.replyMode {
 		helpText = "enter to send reply • esc to cancel"
 	} else {
-		helpText = "j/k or ↑/↓ to navigate • r to reply • d to delete • esc to return"
+		helpText = "j/k or ↑/↓ to navigate • enter/t to view thread • r to reply • q/esc to return"
+	}
+	s.WriteString(st.helpStyle.Render(helpText))
+
+	return s.String()
+}
+
+func (m model) viewConversationMessages() string {
+	st := m.getStyles()
+	var s strings.Builder
+
+	// Title with conversation partner
+	title := st.titleStyle.Width(70).Render(fmt.Sprintf("💬  Conversation with %s", m.conversationPartner))
+	s.WriteString(title)
+	s.WriteString("\n")
+
+	// Fixed height container for messages
+	var messagesContent strings.Builder
+
+	if len(m.conversationMessages) == 0 {
+		// Empty state
+		emptyMsg := st.emptyStateStyle.Width(70).Render("📭 No messages in this conversation!")
+		messagesContent.WriteString(emptyMsg)
+	} else {
+		// Show max 3 messages at a time (1 expanded, 2 compact)
+		const maxVisible = 3
+
+		// Calculate which messages to show
+		var startIdx, endIdx int
+		if m.selectedMessageIndex == 0 {
+			startIdx = 0
+			endIdx = maxVisible
+			if endIdx > len(m.conversationMessages) {
+				endIdx = len(m.conversationMessages)
+			}
+		} else if m.selectedMessageIndex >= len(m.conversationMessages)-1 {
+			endIdx = len(m.conversationMessages)
+			startIdx = endIdx - maxVisible
+			if startIdx < 0 {
+				startIdx = 0
+			}
+		} else {
+			startIdx = m.selectedMessageIndex - 1
+			if startIdx < 0 {
+				startIdx = 0
+			}
+			endIdx = startIdx + maxVisible
+			if endIdx > len(m.conversationMessages) {
+				endIdx = len(m.conversationMessages)
+			}
+		}
+
+		// Display the visible messages
+		for i := startIdx; i < endIdx; i++ {
+			msg := m.conversationMessages[i]
+			isFromUser := msg.FromKey == m.userKey
+
+			if i == m.selectedMessageIndex {
+				// Selected message - full expanded view
+				var messageContent strings.Builder
+
+				// Header with sender indicator
+				var header string
+				if isFromUser {
+					header = st.messageHeaderStyle.Render("You")
+				} else {
+					header = st.messageHeaderStyle.Render(fmt.Sprintf("From: %s", msg.FromKey))
+				}
+				if !msg.Read && !isFromUser {
+					header += " " + st.newBadgeStyle.Render(" NEW ")
+				}
+				messageContent.WriteString(header)
+				messageContent.WriteString("\n")
+
+				// Timestamp
+				msgLines := strings.Split(msg.Message, "\n")
+				maxMessageLines := 5
+				if m.replyMode {
+					maxMessageLines = 4
+				}
+
+				timeStr := st.messageTimeStyle.Render(msg.Timestamp.Format("Mon, Jan 2 2006 at 15:04"))
+
+				if len(msgLines) > maxMessageLines {
+					helperStyle := m.renderer.NewStyle().Foreground(st.mutedColor)
+					helperText := helperStyle.Render("j/k ↑↓ to view full message")
+
+					const internalWidth = 66
+					leftWidth := lipgloss.Width(timeStr)
+					rightWidth := lipgloss.Width(helperText)
+					spacingWidth := internalWidth - leftWidth - rightWidth
+					if spacingWidth < 1 {
+						spacingWidth = 1
+					}
+
+					timestampLine := timeStr + strings.Repeat(" ", spacingWidth) + helperText
+					messageContent.WriteString(timestampLine)
+				} else {
+					messageContent.WriteString(timeStr)
+				}
+				messageContent.WriteString("\n")
+
+				// Message content with scroll
+				startLine := m.messageScrollOffset
+				endLine := startLine + maxMessageLines
+				if endLine > len(msgLines) {
+					endLine = len(msgLines)
+				}
+
+				for j := 0; j < maxMessageLines; j++ {
+					lineIdx := startLine + j
+					if lineIdx < len(msgLines) {
+						messageContent.WriteString(msgLines[lineIdx])
+					}
+					if j < maxMessageLines-1 {
+						messageContent.WriteString("\n")
+					}
+				}
+
+				// Add reply input if in reply mode
+				if m.replyMode {
+					messageContent.WriteString("\n")
+
+					const internalWidth = 66
+					inputView := m.replyInput.View()
+					currentWidth := lipgloss.Width(inputView)
+					paddingNeeded := internalWidth - currentWidth
+					if paddingNeeded < 0 {
+						paddingNeeded = 0
+					}
+
+					fullRow := inputView + strings.Repeat(" ", paddingNeeded)
+					rowStyle := m.renderer.NewStyle().
+						Background(st.mutedColor).
+						Width(internalWidth)
+
+					styledRow := rowStyle.Render(fullRow)
+					messageContent.WriteString(styledRow)
+				}
+
+				// Choose border color based on sender
+				borderColor := st.accentColor
+				if isFromUser {
+					borderColor = st.secondaryColor
+				}
+
+				selectedStyle := m.renderer.NewStyle().
+					Border(lipgloss.ThickBorder()).
+					BorderForeground(borderColor).
+					Padding(1, 2).
+					MarginBottom(1).
+					Width(70)
+				box := selectedStyle.Render(messageContent.String())
+				messagesContent.WriteString(box)
+			} else {
+				// Unselected message - compact one-line view
+				var senderStr string
+				if isFromUser {
+					senderStr = "You"
+				} else {
+					sender := msg.FromKey
+					if len(sender) > 20 {
+						sender = sender[:17] + "..."
+					}
+					senderStr = sender
+				}
+
+				dateTimeStr := msg.Timestamp.Format("2006-01-02 15:04")
+
+				// Direction indicator
+				var directionText string
+				isMiddleBox := (m.selectedMessageIndex == 0 && i == startIdx+1) ||
+					(m.selectedMessageIndex == len(m.conversationMessages)-1 && i == endIdx-2)
+
+				if !isMiddleBox {
+					if i < m.selectedMessageIndex {
+						if i == 0 {
+							directionText = "  Newest"
+						} else {
+							newerCount := i
+							directionText = fmt.Sprintf("  %d newer...", newerCount)
+						}
+					} else if i > m.selectedMessageIndex {
+						if i == len(m.conversationMessages)-1 {
+							directionText = "  Oldest"
+						} else {
+							olderCount := len(m.conversationMessages) - i - 1
+							directionText = fmt.Sprintf("  %d older...", olderCount)
+						}
+					}
+				}
+
+				// Build the compact line
+				var leftPart string
+				if isFromUser {
+					leftPart = senderStr
+				} else {
+					leftPart = fmt.Sprintf("From: %s", senderStr)
+				}
+				if !msg.Read && !isFromUser {
+					leftPart += " " + st.newBadgeStyle.Render(" NEW ")
+				}
+
+				rightPart := dateTimeStr + directionText
+
+				const internalWidth = 68
+				leftWidth := lipgloss.Width(leftPart)
+				rightWidth := lipgloss.Width(rightPart)
+				spacingWidth := internalWidth - leftWidth - rightWidth
+				if spacingWidth < 1 {
+					spacingWidth = 1
+				}
+
+				compactLine := leftPart + strings.Repeat(" ", spacingWidth) + rightPart
+
+				compactStyle := m.renderer.NewStyle().
+					Border(lipgloss.RoundedBorder()).
+					BorderForeground(st.mutedColor).
+					Padding(0, 1).
+					MarginBottom(1).
+					Width(70)
+				box := compactStyle.Render(compactLine)
+				messagesContent.WriteString(box)
+			}
+
+			if i < endIdx-1 {
+				messagesContent.WriteString("\n")
+			}
+		}
+	}
+
+	// Manually pad to fixed height
+	content := messagesContent.String()
+	renderedLines := strings.Split(content, "\n")
+	actualLineCount := len(renderedLines)
+	targetLines := 15
+
+	s.WriteString(content)
+
+	paddingNeeded := targetLines - actualLineCount
+	if paddingNeeded > 0 {
+		s.WriteString(strings.Repeat("\n", paddingNeeded))
+	}
+
+	// Success or error messages
+	if m.successMsg != "" {
+		s.WriteString(m.renderer.NewStyle().Foreground(st.successColor).Render("  ✓ " + m.successMsg))
+	} else if m.err != nil {
+		s.WriteString(m.renderer.NewStyle().Foreground(st.errorColor).Render("  ✗ " + m.err.Error()))
+	}
+
+	// Help text
+	var helpText string
+	if m.replyMode {
+		helpText = "enter to send reply • esc to cancel"
+	} else {
+		helpText = "j/k or ↑/↓ to navigate • r to reply • d to delete • esc/q to go back"
 	}
 	s.WriteString(st.helpStyle.Render(helpText))
 

@@ -107,6 +107,30 @@ func (d *Database) GetMessagesForUser(fingerprint string) ([]Message, error) {
 	return messages, rows.Err()
 }
 
+func (d *Database) GetConversationMessages(userKey, otherKey string) ([]Message, error) {
+	rows, err := d.db.Query(`
+		SELECT id, from_key, to_key, message, timestamp, read
+		FROM messages
+		WHERE (from_key = ? AND to_key = ?) OR (from_key = ? AND to_key = ?)
+		ORDER BY timestamp DESC
+	`, userKey, otherKey, otherKey, userKey)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var messages []Message
+	for rows.Next() {
+		var msg Message
+		if err := rows.Scan(&msg.ID, &msg.FromKey, &msg.ToKey, &msg.Message, &msg.Timestamp, &msg.Read); err != nil {
+			return nil, err
+		}
+		messages = append(messages, msg)
+	}
+
+	return messages, rows.Err()
+}
+
 func (d *Database) SendMessage(fromKey, toKey, message string) error {
 	_, err := d.db.Exec(`
 		INSERT INTO messages (from_key, to_key, message, timestamp, read)
