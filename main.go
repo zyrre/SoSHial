@@ -18,12 +18,77 @@ import (
 	"github.com/charmbracelet/wish"
 	"github.com/charmbracelet/wish/bubbletea"
 	"github.com/charmbracelet/wish/logging"
+	"github.com/muesli/termenv"
 	gossh "golang.org/x/crypto/ssh"
 )
 
 const (
 	dbPath = "./soshial.db"
 )
+
+// detectColorProfile intelligently detects the color profile based on TERM environment
+func detectColorProfile(term string) termenv.Profile {
+	term = strings.ToLower(term)
+
+	// TrueColor terminals (24-bit color)
+	// Modern terminals like Alacritty, Kitty, WezTerm, etc.
+	if strings.Contains(term, "truecolor") ||
+		strings.Contains(term, "24bit") ||
+		strings.Contains(term, "alacritty") ||
+		strings.Contains(term, "kitty") ||
+		strings.Contains(term, "wezterm") ||
+		strings.HasPrefix(term, "iterm") ||
+		strings.HasSuffix(term, "-direct") {
+		return termenv.TrueColor
+	}
+
+	// Most modern terminals report as xterm-256color but actually support TrueColor
+	// This includes: Alacritty, Kitty, modern GNOME Terminal, Konsole, etc.
+	// TrueColor colors gracefully degrade to 256 colors if not supported
+	if strings.Contains(term, "256color") || strings.Contains(term, "256") {
+		return termenv.TrueColor
+	}
+
+	// Screen/tmux - these are terminal multiplexers that typically support 256 colors
+	// But may not support TrueColor depending on configuration
+	if strings.HasPrefix(term, "screen") || strings.HasPrefix(term, "tmux") {
+		return termenv.ANSI256
+	}
+
+	// Basic xterm without 256color suffix
+	if strings.HasPrefix(term, "xterm") {
+		return termenv.ANSI256
+	}
+
+	// Basic ANSI terminals (16 colors)
+	// Windows cmd, older terminals
+	if strings.Contains(term, "ansi") ||
+		strings.Contains(term, "cygwin") ||
+		strings.Contains(term, "msys") ||
+		term == "dumb" {
+		return termenv.ANSI
+	}
+
+	// Default to TrueColor for unknown modern terminals
+	// Most SSH clients in 2025+ support TrueColor
+	return termenv.TrueColor
+}
+
+// profileName returns a human-readable name for the color profile
+func profileName(p termenv.Profile) string {
+	switch p {
+	case termenv.TrueColor:
+		return "TrueColor (24-bit)"
+	case termenv.ANSI256:
+		return "ANSI256 (256 colors)"
+	case termenv.ANSI:
+		return "ANSI (16 colors)"
+	case termenv.Ascii:
+		return "ASCII (no colors)"
+	default:
+		return "Unknown"
+	}
+}
 
 func main() {
 	// Get host from environment variable, default to localhost
@@ -148,12 +213,14 @@ func bubbleTeaMiddleware(db *Database, rateLimiter *RateLimiter) wish.Middleware
 		// Create a renderer with color support for the SSH session
 		renderer := lipgloss.NewRenderer(s)
 
-		// Force color output - ANSI256 colors (profile ID 2)
+		// Auto-detect color profile based on terminal capabilities
 		termEnv := pty.Term
 		log.Printf("Terminal type: %s", termEnv)
 
-		// Force ANSI256 color profile
-		renderer.SetColorProfile(2) // 2 = ANSI256
+		// Intelligently set color profile based on TERM environment
+		profile := detectColorProfile(termEnv)
+		renderer.SetColorProfile(profile)
+		log.Printf("Using color profile: %s", profileName(profile))
 
 		m := newModel(db, fingerprint, renderer, rateLimiter)
 		m.width = pty.Window.Width

@@ -10,6 +10,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 )
 
 type screen int
@@ -83,6 +84,168 @@ type messageThread struct {
 	messageCount  int
 	latestMessage Message
 	allMessages   []Message
+}
+
+// Icon provides terminal-compatible icons with ASCII fallbacks
+type Icon struct {
+	emoji string
+	ascii string
+}
+
+var icons = map[string]Icon{
+	"mail":      {emoji: "✉", ascii: "[M]"},
+	"check":     {emoji: "✓", ascii: "[OK]"},
+	"cross":     {emoji: "✗", ascii: "[X]"},
+	"pencil":    {emoji: "📝", ascii: "[>]"},
+	"palette":   {emoji: "🎨", ascii: "[*]"},
+	"door":      {emoji: "🚪", ascii: "[Q]"},
+	"mailbox":   {emoji: "📭", ascii: "[-]"},
+	"thread":    {emoji: "🧵", ascii: "[T]"},
+	"chat":      {emoji: "💬", ascii: "[C]"},
+	"arrow":     {emoji: "▶", ascii: ">"},
+}
+
+// Daily quotes - rotates based on date
+var dailyQuotes = []string{
+	"Code never lies, comments sometimes do. — Ron Jeffries",
+	"First, solve the problem. Then, write the code. — John Johnson",
+	"Simplicity is prerequisite for reliability. — Edsger Dijkstra",
+	"Make it work, make it right, make it fast. — Kent Beck",
+	"Debugging is twice as hard as writing code. — Brian Kernighan",
+	"Any fool can write code that a computer can understand. — Fowler",
+	"Good code is its own best documentation. — Steve McConnell",
+	"Code is like humor. When you have to explain it, it's bad.",
+	"Software is like sex: it's better when it's free. — Torvalds",
+	"There are two hard things: cache invalidation & naming things.",
+	"Talk is cheap. Show me the code. — Linus Torvalds",
+	"Premature optimization is the root of all evil. — Knuth",
+	"Testing shows the presence, not the absence of bugs. — Dijkstra",
+	"Deleted code is debugged code. — Jeff Sickel",
+	"The best error message is the one that never shows up.",
+	"Walking on water and software from spec are easy if frozen.",
+	"Don't document bad code—rewrite it. — Kernighan & Plauger",
+	"Programs must be written for people to read. — Abelson",
+	"Always code as if the maintainer is a violent psychopath.",
+	"Hofstadter's Law: It takes longer than expected, even then.",
+	"There are only two kinds of languages: hated or unused.",
+	"The best thing about a boolean? You're only off by a bit.",
+	"To iterate is human, to recurse divine. — L. Peter Deutsch",
+	"If debugging is removing bugs, programming is adding them.",
+	"640K ought to be enough for anybody. — Bill Gates, 1981",
+	"A good programmer looks both ways before crossing one-way street.",
+	"Weeks of coding can save you hours of planning.",
+	"It works on my machine! — Every developer ever",
+	"In theory, theory and practice are the same. In practice...",
+	"Software and churches are similar: both are built on faith.",
+	"There's no place like 127.0.0.1",
+	"Roses are red, violets are blue, unexpected '}' on line 32.",
+	"I would love to change the world, but they won't give me source.",
+	"Linux is only free if your time has no value. — Jamie Zawinski",
+	"I'm not anti-social; I'm just not user friendly.",
+	"Programmers: turning coffee into code since 1958.",
+	"Algorithm: word used by programmers when they don't want to explain.",
+	"99 bugs in the code, 99 bugs. Take one down, patch it around...",
+	"Keyboard not found. Press F1 to continue.",
+	"The code you write makes you a programmer. The code you delete...",
+	"Programming: where 'it works!' means 'I have no idea why.'",
+	"Computers do what you tell them, not what you want.",
+	"A programmer is a machine that turns coffee into code.",
+	"Best six-word horror story: 'Laptop battery dies during git push'",
+	"Never trust a computer you can't throw out a window. — Wozniak",
+	"The most dangerous phrase: 'We've always done it this way.'",
+	"Measuring progress by lines of code is like measuring by weight.",
+	"Fast, good, cheap: pick any two.",
+	"Every great developer was once a beginner who refused to give up.",
+	"Software under development: where bugs are features in disguise.",
+	"Code review: where you realize your code isn't as good as you thought.",
+	"Git commit -m 'Fixed stuff' — Every rushed Friday deployment",
+	"Real programmers count from 0.",
+	"Legacy code: code without tests. — Michael Feathers",
+	"Pair programming: when two heads are better than one keyboard.",
+	"Tech debt: easy to create, expensive to pay back.",
+	"The cloud is just someone else's computer.",
+	"It's not a bug, it's an undocumented feature!",
+	"AI won't replace you. Someone using AI will.",
+	"sudo make me a sandwich — Proper way to ask for help",
+	"HTML is a programming language. — Said no one ever",
+	"Stack Overflow: where copy-paste is a strategy, not cheating.",
+	"Refactoring: making code better without changing what it does.",
+	"Variable names should be self-documenting. 'x' is not.",
+	"The best code is no code at all.",
+	"Git happens.",
+	"404: Motivation not found. Please restart IDE.",
+	"You never finish a program, you just stop working on it.",
+	"Ctrl+Z: the developer's time machine.",
+	"Rubber duck debugging: explain code to duck, find bug yourself.",
+	"Comments: apologies to future self.",
+	"Software is a gas: expands to fill available memory.",
+	"Tabs vs spaces: the eternal holy war.",
+	"Merging branches: where conflicts are personal.",
+	"Production is the best testing environment. — Nobody (officially)",
+	"Writing documentation is like flossing: everyone knows they should.",
+	"Backend: where the real magic happens. Frontend: where it looks good.",
+	"Code freeze: when panic sets in.",
+	"Deprecated: still works, but we're judging you for using it.",
+	"Error 418: I'm a teapot. — Most useless HTTP status",
+	"Schrödinger's bug: works until you observe it in production.",
+	"The quieter you become, the more you can hear. — Zen of debugging",
+	"Code coverage: 80% written, 20% tested, 100% shipped.",
+	"Technical interview: solving problems you'll never face at work.",
+	"Inheritance: parents' code, children's bugs.",
+	"JSON: JavaScript's way of saying 'I can be a database too!'",
+	"SQL injection: a developer's nightmare, a hacker's playground.",
+	"Regex: write once, read never.",
+	"While(true): infinite loop, infinite possibilities, finite patience.",
+	"Console.log(): printf debugging in a fancy dress.",
+	"Quantum bug: exists in superposition until QA tests it.",
+	"Clean code: wrote it yesterday, can't understand it today.",
+	"Monday: git checkout -b new-week",
+	"Deployment Friday: for those who enjoy weekend surprises.",
+	"The only constant in software development is change.",
+	"README files: the documentation nobody reads.",
+	"Async/await: making callbacks great again.",
+	"Microservices: monolith's midlife crisis.",
+	"Docker: it works on my container!",
+	"Kubernetes: making simple things complicated since 2014.",
+	"Code quality: measured by WTFs per minute during review.",
+	"Multithreading: making bugs harder to reproduce since 1960s.",
+	"Memory leak: when your program refuses to let go.",
+	"Compiler warnings: suggestions you shouldn't ignore.",
+	"Hot fix: the art of patching production at 3 AM.",
+	"Blockchain: the answer to a question nobody asked.",
+	"NPM install: summoning the node_modules black hole.",
+	"Code smell: when something's wrong but you can't name it.",
+	"Spaghetti code: when goto had too much fun.",
+	"Technical debt: the credit card of software development.",
+	"Race condition: when timing is everything, and everything's wrong.",
+	"Segmentation fault: core dumped. Dreams dumped too.",
+	"Undefined behavior: anything can happen, and it usually does.",
+	"Off-by-one error: the fencepost problem that never gets old.",
+}
+
+func (m model) icon(name string) string {
+	ic, ok := icons[name]
+	if !ok {
+		return "?"
+	}
+
+	// Check if renderer supports rich colors (256+ colors)
+	// If it does, terminal likely supports emojis too
+	profile := m.renderer.ColorProfile()
+	if profile == termenv.TrueColor || profile == termenv.ANSI256 {
+		return ic.emoji
+	}
+
+	// Use ASCII fallback for basic terminals
+	return ic.ascii
+}
+
+// getTodaysQuote returns the quote of the day based on current date
+func getTodaysQuote() string {
+	// Use day of year to select quote (changes daily)
+	dayOfYear := time.Now().YearDay()
+	index := dayOfYear % len(dailyQuotes)
+	return dailyQuotes[index]
 }
 
 type model struct {
@@ -358,6 +521,28 @@ func tickEveryMinute() tea.Cmd {
 	})
 }
 
+// getBorder returns the appropriate border style based on terminal capabilities
+func (m model) getBorder() lipgloss.Border {
+	profile := m.renderer.ColorProfile()
+
+	// For basic terminals (ASCII, ANSI), use simple ASCII borders
+	if profile == termenv.Ascii || profile == termenv.ANSI {
+		return lipgloss.Border{
+			Top:         "-",
+			Bottom:      "-",
+			Left:        "|",
+			Right:       "|",
+			TopLeft:     "+",
+			TopRight:    "+",
+			BottomLeft:  "+",
+			BottomRight: "+",
+		}
+	}
+
+	// For 256-color and TrueColor terminals, use Unicode box drawing
+	return lipgloss.RoundedBorder()
+}
+
 // Helper method to get styles from renderer
 func (m model) getStyles() styles {
 	r := m.renderer
@@ -472,7 +657,7 @@ func (m model) getStyles() styles {
 			Foreground(t.muted).
 			Italic(true).
 			Align(lipgloss.Center).
-			Border(lipgloss.RoundedBorder()).
+			Border(m.getBorder()).
 			BorderForeground(t.muted).
 			Padding(2, 4),
 	}
@@ -1037,12 +1222,12 @@ func (m model) viewMainMenu() string {
 	s.WriteString("\n\n")
 
 	// Menu options
-	viewMessagesText := fmt.Sprintf("✉  View messages (%d)", m.messageCount)
+	viewMessagesText := fmt.Sprintf("%s  View messages (%d)", m.icon("mail"), m.messageCount)
 	menuItems := []string{
 		viewMessagesText,
-		"📝 Send a message",
-		"🎨 Change theme",
-		"🚪 Quit",
+		fmt.Sprintf("%s Send a message", m.icon("pencil")),
+		fmt.Sprintf("%s Change theme", m.icon("palette")),
+		fmt.Sprintf("%s Quit", m.icon("door")),
 	}
 
 	// Calculate left padding to center the first row (with indicator/spaces)
@@ -1060,7 +1245,7 @@ func (m model) viewMainMenu() string {
 		var menuLine string
 		if i == m.selectedMenuItem {
 			// Selected: use selection color for both emoji and text
-			indicator := m.renderer.NewStyle().Foreground(st.accentColor).Render("▶ ")
+			indicator := m.renderer.NewStyle().Foreground(st.accentColor).Render(m.icon("arrow") + " ")
 			styledEmoji := m.renderer.NewStyle().Foreground(st.selectionColor).Bold(true).Render(emoji)
 			styledText := m.renderer.NewStyle().Foreground(st.selectionColor).Bold(true).Render(text)
 			menuLine = strings.Repeat(" ", leftPadding) + indicator + styledEmoji + styledText
@@ -1119,7 +1304,7 @@ func (m model) viewMainMenu() string {
 				coloredThemeName.WriteString(coloredChar)
 			}
 
-			checkmark := m.renderer.NewStyle().Foreground(st.successColor).Render("✓")
+			checkmark := m.renderer.NewStyle().Foreground(st.successColor).Render(m.icon("check"))
 			normalText := m.renderer.NewStyle().Foreground(st.textColor).Render(" Theme changed to ")
 
 			// Center the entire message
@@ -1132,11 +1317,30 @@ func (m model) viewMainMenu() string {
 			s.WriteString(centeredMessage)
 		} else {
 			// Other success messages without background
-			s.WriteString(m.renderer.NewStyle().Foreground(st.successColor).Render("  ✓ " + m.successMsg))
+			s.WriteString(m.renderer.NewStyle().Foreground(st.successColor).Render("  " + m.icon("check") + " " + m.successMsg))
 		}
 	} else if m.err != nil {
-		s.WriteString(m.renderer.NewStyle().Foreground(st.errorColor).Render("  ✗ " + m.err.Error()))
+		s.WriteString(m.renderer.NewStyle().Foreground(st.errorColor).Render("  " + m.icon("cross") + " " + m.err.Error()))
 	}
+
+	// MOTD (Message of the Day)
+	motdTitle := m.renderer.NewStyle().
+		Foreground(st.primaryColor).
+		Bold(true).
+		Width(60).
+		Align(lipgloss.Center).
+		Render("─── MOTD ───")
+	s.WriteString(motdTitle)
+	s.WriteString("\n")
+
+	quote := getTodaysQuote()
+	motdQuote := m.renderer.NewStyle().
+		Foreground(st.mutedColor).
+		Italic(true).
+		Width(60).
+		Align(lipgloss.Center).
+		Render(quote)
+	s.WriteString(motdQuote)
 	s.WriteString("\n")
 
 	// Help text
@@ -1161,7 +1365,7 @@ func (m model) viewThreadedMessages() string {
 	var s strings.Builder
 
 	// Title
-	title := st.titleStyle.Width(70).Render("✉  Your Messages")
+	title := st.titleStyle.Width(70).Render(fmt.Sprintf("%s  Your Messages", m.icon("mail")))
 	s.WriteString(title)
 	s.WriteString("\n")
 
@@ -1170,7 +1374,7 @@ func (m model) viewThreadedMessages() string {
 
 	if len(m.threads) == 0 {
 		// Empty state
-		emptyMsg := st.emptyStateStyle.Width(70).Render("📭 No messages yet!\n\nYour inbox is empty.")
+		emptyMsg := st.emptyStateStyle.Width(70).Render(fmt.Sprintf("%s No messages yet!\n\nYour inbox is empty.", m.icon("mailbox")))
 		messagesContent.WriteString(emptyMsg)
 	} else {
 		// Show max 3 threads at a time (1 expanded, 2 compact)
@@ -1219,7 +1423,7 @@ func (m model) viewThreadedMessages() string {
 				if thread.messageCount > 1 {
 					threadBadge := m.renderer.NewStyle().
 						Foreground(st.accentColor).
-						Render(fmt.Sprintf(" 🧵 %d", thread.messageCount))
+						Render(fmt.Sprintf(" %s %d", m.icon("thread"), thread.messageCount))
 					header += " " + threadBadge
 				}
 				messageContent.WriteString(header)
@@ -1355,7 +1559,7 @@ func (m model) viewThreadedMessages() string {
 				}
 				// Add compact thread count indicator
 				if thread.messageCount > 1 {
-					leftPart += fmt.Sprintf(" (🧵 %d)", thread.messageCount)
+					leftPart += fmt.Sprintf(" (%s %d)", m.icon("thread"), thread.messageCount)
 				}
 
 				rightPart := dateTimeStr + directionText
@@ -1409,9 +1613,9 @@ func (m model) viewThreadedMessages() string {
 
 	// Success or error messages (fixed height to keep bottom elements stable)
 	if m.successMsg != "" {
-		s.WriteString(m.renderer.NewStyle().Foreground(st.successColor).Render("  ✓ " + m.successMsg))
+		s.WriteString(m.renderer.NewStyle().Foreground(st.successColor).Render("  " + m.icon("check") + " " + m.successMsg))
 	} else if m.err != nil {
-		s.WriteString(m.renderer.NewStyle().Foreground(st.errorColor).Render("  ✗ " + m.err.Error()))
+		s.WriteString(m.renderer.NewStyle().Foreground(st.errorColor).Render("  " + m.icon("cross") + " " + m.err.Error()))
 	}
 
 	// Help text depends on reply mode
@@ -1431,7 +1635,7 @@ func (m model) viewConversationMessages() string {
 	var s strings.Builder
 
 	// Title with conversation partner
-	title := st.titleStyle.Width(70).Render(fmt.Sprintf("💬  Conversation with %s", m.conversationPartner))
+	title := st.titleStyle.Width(70).Render(fmt.Sprintf("%s  Conversation with %s", m.icon("chat"), m.conversationPartner))
 	s.WriteString(title)
 	s.WriteString("\n")
 
@@ -1440,7 +1644,7 @@ func (m model) viewConversationMessages() string {
 
 	if len(m.conversationMessages) == 0 {
 		// Empty state
-		emptyMsg := st.emptyStateStyle.Width(70).Render("📭 No messages in this conversation!")
+		emptyMsg := st.emptyStateStyle.Width(70).Render(fmt.Sprintf("%s No messages in this conversation!", m.icon("mailbox")))
 		messagesContent.WriteString(emptyMsg)
 	} else {
 		// Show max 3 messages at a time (1 expanded, 2 compact)
@@ -1665,9 +1869,9 @@ func (m model) viewConversationMessages() string {
 
 	// Success or error messages
 	if m.successMsg != "" {
-		s.WriteString(m.renderer.NewStyle().Foreground(st.successColor).Render("  ✓ " + m.successMsg))
+		s.WriteString(m.renderer.NewStyle().Foreground(st.successColor).Render("  " + m.icon("check") + " " + m.successMsg))
 	} else if m.err != nil {
-		s.WriteString(m.renderer.NewStyle().Foreground(st.errorColor).Render("  ✗ " + m.err.Error()))
+		s.WriteString(m.renderer.NewStyle().Foreground(st.errorColor).Render("  " + m.icon("cross") + " " + m.err.Error()))
 	}
 
 	// Help text
@@ -1687,17 +1891,17 @@ func (m model) viewSendMessageRecipient() string {
 	var s strings.Builder
 
 	// Title
-	title := st.titleStyle.Width(70).Render("📝  Send Message")
+	title := st.titleStyle.Width(70).Render(fmt.Sprintf("%s  Send Message", m.icon("pencil")))
 	s.WriteString(title)
 	s.WriteString("\n\n")
 
 	// Instructions
-	s.WriteString(st.inputLabelStyle.Render("Step 1 of 2: Enter Recipient"))
+	s.WriteString(st.inputLabelStyle.Render("Step 1 of 2: Enter Recipient (their SSH key fingerprint)"))
 	s.WriteString("\n\n")
 
 	// Error message (fixed height to keep bottom elements stable)
 	if m.err != nil {
-		s.WriteString(st.errorStyle.Render(" ✗ " + m.err.Error() + " "))
+		s.WriteString(st.errorStyle.Render(" " + m.icon("cross") + " " + m.err.Error() + " "))
 	}
 	s.WriteString("\n\n")
 
@@ -1717,7 +1921,7 @@ func (m model) viewSendMessageContent() string {
 	var s strings.Builder
 
 	// Title
-	title := st.titleStyle.Width(70).Render("📝  Send Message")
+	title := st.titleStyle.Width(70).Render(fmt.Sprintf("%s  Send Message", m.icon("pencil")))
 	s.WriteString(title)
 	s.WriteString("\n\n")
 
@@ -1734,7 +1938,7 @@ func (m model) viewSendMessageContent() string {
 
 	// Error message (fixed height to keep bottom elements stable)
 	if m.err != nil {
-		s.WriteString(st.errorStyle.Render(" ✗ " + m.err.Error() + " "))
+		s.WriteString(st.errorStyle.Render(" " + m.icon("cross") + " " + m.err.Error() + " "))
 	}
 	s.WriteString("\n\n")
 
