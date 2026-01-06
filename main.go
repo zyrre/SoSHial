@@ -111,8 +111,9 @@ func main() {
 	}
 	defer db.Close()
 
-	// Create rate limiter
+	// Create rate limiter and connection tracker
 	rateLimiter := NewRateLimiter(10 * time.Second)
+	connTracker := NewConnectionTracker(5) // Max 5 connections per user
 
 	s, err := wish.NewServer(
 		wish.WithAddress(fmt.Sprintf("%s:%d", host, port)),
@@ -122,7 +123,7 @@ func main() {
 			return true
 		}),
 		wish.WithMiddleware(
-			bubbleTeaMiddleware(db, rateLimiter),
+			bubbleTeaMiddleware(db, rateLimiter, connTracker),
 			logging.Middleware(),
 		),
 	)
@@ -152,6 +153,50 @@ func main() {
 	}
 }
 
+// ConnectionTracker tracks active connections per user
+type ConnectionTracker struct {
+	activeConnections map[string]int
+	maxPerUser        int
+	mu                sync.Mutex
+}
+
+func NewConnectionTracker(maxPerUser int) *ConnectionTracker {
+	return &ConnectionTracker{
+		activeConnections: make(map[string]int),
+		maxPerUser:        maxPerUser,
+	}
+}
+
+// CanConnect checks if a user can open a new connection
+func (ct *ConnectionTracker) CanConnect(userKey string) bool {
+	ct.mu.Lock()
+	defer ct.mu.Unlock()
+
+	count := ct.activeConnections[userKey]
+	return count < ct.maxPerUser
+}
+
+// AddConnection increments the connection count for a user
+func (ct *ConnectionTracker) AddConnection(userKey string) {
+	ct.mu.Lock()
+	defer ct.mu.Unlock()
+	ct.activeConnections[userKey]++
+}
+
+// RemoveConnection decrements the connection count for a user
+func (ct *ConnectionTracker) RemoveConnection(userKey string) {
+	ct.mu.Lock()
+	defer ct.mu.Unlock()
+
+	if count := ct.activeConnections[userKey]; count > 0 {
+		ct.activeConnections[userKey]--
+		// Clean up if no more connections
+		if ct.activeConnections[userKey] == 0 {
+			delete(ct.activeConnections, userKey)
+		}
+	}
+}
+
 // RateLimiter tracks the last message time per user
 type RateLimiter struct {
 	lastMessageTime map[string]time.Time
@@ -160,10 +205,22 @@ type RateLimiter struct {
 }
 
 func NewRateLimiter(minInterval time.Duration) *RateLimiter {
-	return &RateLimiter{
+	rl := &RateLimiter{
 		lastMessageTime: make(map[string]time.Time),
 		minInterval:     minInterval,
 	}
+
+	// Start cleanup goroutine to prevent memory leak
+	// Remove entries older than 1 hour every 15 minutes
+	go func() {
+		ticker := time.NewTicker(15 * time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			rl.cleanup()
+		}
+	}()
+
+	return rl
 }
 
 // CanSendMessage checks if a user can send a message
@@ -186,7 +243,20 @@ func (rl *RateLimiter) RecordMessage(userKey string) {
 	rl.lastMessageTime[userKey] = time.Now()
 }
 
-func bubbleTeaMiddleware(db *Database, rateLimiter *RateLimiter) wish.Middleware {
+// cleanup removes rate limiter entries older than 1 hour to prevent memory leak
+func (rl *RateLimiter) cleanup() {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	cutoff := time.Now().Add(-1 * time.Hour)
+	for key, lastTime := range rl.lastMessageTime {
+		if lastTime.Before(cutoff) {
+			delete(rl.lastMessageTime, key)
+		}
+	}
+}
+
+func bubbleTeaMiddleware(db *Database, rateLimiter *RateLimiter, connTracker *ConnectionTracker) wish.Middleware {
 	teaHandler := func(s ssh.Session) (tea.Model, []tea.ProgramOption) {
 		pty, _, active := s.Pty()
 		if !active {
@@ -203,6 +273,21 @@ func bubbleTeaMiddleware(db *Database, rateLimiter *RateLimiter) wish.Middleware
 		// Get fingerprint and strip "SHA256:" prefix
 		fingerprintFull := gossh.FingerprintSHA256(pubKey)
 		fingerprint := strings.TrimPrefix(fingerprintFull, "SHA256:")
+
+		// Check connection limit per user
+		if !connTracker.CanConnect(fingerprint) {
+			wish.Fatalln(s, "connection limit reached (max 5 concurrent connections per user)")
+			return nil, nil
+		}
+
+		// Track this connection
+		connTracker.AddConnection(fingerprint)
+
+		// Ensure connection is removed when session ends
+		go func() {
+			<-s.Context().Done()
+			connTracker.RemoveConnection(fingerprint)
+		}()
 
 		// Upsert user in database
 		if err := db.UpsertUser(fingerprint); err != nil {

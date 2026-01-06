@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"fmt"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -132,7 +133,16 @@ func (d *Database) GetConversationMessages(userKey, otherKey string) ([]Message,
 }
 
 func (d *Database) SendMessage(fromKey, toKey, message string) error {
-	_, err := d.db.Exec(`
+	// Check database size limit (1GB max)
+	sizeMB, err := d.GetDatabaseSizeMB()
+	if err == nil && sizeMB > 1000 {
+		return fmt.Errorf("database size limit reached (%.2f MB / 1000 MB)", sizeMB)
+	}
+
+	// Sanitize message content to prevent ANSI escape code injection
+	message = SanitizeMessage(message)
+
+	_, err = d.db.Exec(`
 		INSERT INTO messages (from_key, to_key, message, timestamp, read)
 		VALUES (?, ?, ?, ?, 0)
 	`, fromKey, toKey, message, time.Now())
@@ -158,4 +168,24 @@ func (d *Database) DeleteMessage(messageID int64) error {
 
 func (d *Database) Close() error {
 	return d.db.Close()
+}
+
+// GetDatabaseSizeMB returns the current database size in megabytes
+func (d *Database) GetDatabaseSizeMB() (float64, error) {
+	var pageCount, pageSize int64
+
+	err := d.db.QueryRow("PRAGMA page_count").Scan(&pageCount)
+	if err != nil {
+		return 0, err
+	}
+
+	err = d.db.QueryRow("PRAGMA page_size").Scan(&pageSize)
+	if err != nil {
+		return 0, err
+	}
+
+	sizeBytes := float64(pageCount * pageSize)
+	sizeMB := sizeBytes / (1024 * 1024)
+
+	return sizeMB, nil
 }

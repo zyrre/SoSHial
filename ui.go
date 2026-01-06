@@ -1059,6 +1059,11 @@ func (m model) updateSendMessageRecipient(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.err = fmt.Errorf("recipient cannot be empty")
 			return m, nil
 		}
+		// Validate SSH fingerprint format (43 chars of base64)
+		if !ValidateSSHFingerprint(m.recipient) {
+			m.err = fmt.Errorf("invalid fingerprint format (must be 43 characters of base64)")
+			return m, nil
+		}
 		m.currentScreen = sendMessageContent
 		m.recipientInput.Blur()
 		m.messageInput.SetValue("")
