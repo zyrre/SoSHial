@@ -2,7 +2,7 @@
 
 Terminal messaging over SSH.
 
-![Demo](demo.gif)
+![GIFS](https://github.com/zyrre/soshial/blob/main/gifs/soshial.gif)
 
 ## Features
 
