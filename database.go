@@ -72,16 +72,25 @@ func (d *Database) initSchema() error {
 	return err
 }
 
-func (d *Database) UpsertUser(fingerprint string) error {
+func (d *Database) UpsertUser(fingerprint string) (isNewUser bool, err error) {
 	now := time.Now()
 
-	_, err := d.db.Exec(`
+	// Check if user already exists
+	var exists bool
+	err = d.db.QueryRow(`
+		SELECT EXISTS(SELECT 1 FROM users WHERE ssh_key_fingerprint = ?)
+	`, fingerprint).Scan(&exists)
+	if err != nil {
+		return false, err
+	}
+
+	_, err = d.db.Exec(`
 		INSERT INTO users (ssh_key_fingerprint, first_seen, last_seen)
 		VALUES (?, ?, ?)
 		ON CONFLICT(ssh_key_fingerprint) DO UPDATE SET last_seen = ?
 	`, fingerprint, now, now, now)
 
-	return err
+	return !exists, err
 }
 
 func (d *Database) GetMessagesForUser(fingerprint string) ([]Message, error) {

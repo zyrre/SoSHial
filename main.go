@@ -290,9 +290,17 @@ func bubbleTeaMiddleware(db *Database, rateLimiter *RateLimiter, connTracker *Co
 		}()
 
 		// Upsert user in database
-		if err := db.UpsertUser(fingerprint); err != nil {
+		isNewUser, err := db.UpsertUser(fingerprint)
+		if err != nil {
 			wish.Fatalln(s, fmt.Sprintf("failed to update user: %v", err))
 			return nil, nil
+		}
+
+		// Send welcome message for new users
+		if isNewUser {
+			if err := db.SendMessage("system", fingerprint, "Welcome to SoSHial!"); err != nil {
+				log.Printf("Failed to send welcome message to %s: %v", fingerprint, err)
+			}
 		}
 
 		// Create a renderer with color support for the SSH session
